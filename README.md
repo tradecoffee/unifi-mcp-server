@@ -187,6 +187,15 @@ The UniFi MCP Server supports **multiple transport modes** for different deploym
 > to start unless `MCP_AUTH_TOKEN` is set; clients then send `Authorization: Bearer <token>`.
 > The server binds to `127.0.0.1` by default — terminate TLS and authenticate at a reverse proxy
 > before widening `MCP_SERVER_HOST` to `0.0.0.0`.
+>
+> 🔐 **Optional Cloudflare Access layer:** when the server sits behind Cloudflare Access
+> (e.g. a hosted deployment fronted by a Zero Trust application), set both
+> `CF_ACCESS_TEAM_DOMAIN` (e.g. `yourteam.cloudflareaccess.com`) and `CF_ACCESS_AUD`
+> (the application AUD tag, found in Zero Trust → Access → Applications → your app →
+> Overview; comma-separate for several). Every HTTP request then also needs a valid
+> `Cf-Access-Jwt-Assertion` header, which Cloudflare injects — requests that bypass
+> Cloudflare (e.g. hitting the origin's raw URL) get 403. Both variables must be set
+> together, and bearer-token auth still applies on top.
 
 **💡 Recommendation**: Use **STDIO** for local AI clients (Claude Desktop, Cursor). Use **Streamable HTTP** when running behind an authenticating MCP gateway or reverse proxy — prefer it over SSE, which is kept only for backward compatibility.
 
@@ -1065,6 +1074,8 @@ See [docs/SKILLS.md](docs/SKILLS.md) for the full guide.
   - `MCP_SERVER_HOST`: Bind address for network transports (default: `127.0.0.1`)
   - `MCP_SERVER_PORT`: Server port (default: `3000`)
   - `MCP_AUTH_TOKEN`: Bearer token required for network transports; comma-separate for several (default: unset — network transports refuse to start without it)
+  - `CF_ACCESS_TEAM_DOMAIN`: Optional Cloudflare Access team domain (e.g. `yourteam.cloudflareaccess.com`); requires `CF_ACCESS_AUD` (default: unset)
+  - `CF_ACCESS_AUD`: Optional Cloudflare Access application AUD tag(s), comma-separated; requires `CF_ACCESS_TEAM_DOMAIN` (default: unset)
 
 ### Programmatic Usage
 

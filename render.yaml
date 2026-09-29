@@ -25,3 +25,5 @@ services:
         generateValue: true
       - key: UNIFI_AUDIT_LOG_PATH
         value: /app/logs/audit.log
+      # Optional when fronted by Cloudflare Access: also set
+      # CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD in the Render dashboard.
