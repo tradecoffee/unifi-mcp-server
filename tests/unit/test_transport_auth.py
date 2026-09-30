@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -99,6 +99,25 @@ def test_cf_access_requires_team_domain_too() -> None:
 def test_cf_access_issuer_normalization(raw) -> None:
     settings = _settings(CF_ACCESS_TEAM_DOMAIN=raw, CF_ACCESS_AUD="aud-tag")
     assert settings.cf_access_issuer == "https://team.cloudflareaccess.com"
+
+
+def test_cf_access_whitespace_only_values_fail() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="CF_ACCESS_TEAM_DOMAIN"):
+        _settings(CF_ACCESS_TEAM_DOMAIN="  ", CF_ACCESS_AUD="  ")
+
+
+def test_cf_access_comma_only_aud_fails() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="CF_ACCESS_AUD"):
+        _settings(CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com", CF_ACCESS_AUD=",")
+
+
+def test_cf_access_empty_strings_mean_unset() -> None:
+    settings = _settings(CF_ACCESS_TEAM_DOMAIN="", CF_ACCESS_AUD="")
+    assert settings.cf_access_enabled is False
 
 
 def test_cf_access_audiences_split_on_comma() -> None:
@@ -280,46 +299,47 @@ def test_http_endpoint_accepts_valid_token() -> None:
 # --- Cloudflare Access on top of bearer auth -------------------------------
 
 
-def _cf_enabled_app(stub_verifier):
-    """The streamable-http app wrapped in the CF guard, as main() wires it."""
-    from src.utils.cloudflare_access import CloudflareAccessGuard
-
+def _cf_enabled_app():
+    """The streamable-http app built with main()'s production middleware stack."""
     main = _reload_main(
         MCP_SERVER_TRANSPORT="streamable_http",
         MCP_AUTH_TOKEN="s3cr3t-token",
         CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com",
         CF_ACCESS_AUD="aud-tag",
     )
-    app = main.mcp.http_app(transport="streamable-http")
-    for m in main.build_http_middleware(main.settings):
-        if m.cls is CloudflareAccessGuard:
-            return m.cls(app, **{"verifier": stub_verifier})
-    return app
+    return main, main.mcp.http_app(
+        transport="streamable-http",
+        middleware=main.build_http_middleware(main.settings),
+    )
 
 
 def test_cf_guard_rejects_valid_bearer_without_cf_jwt() -> None:
     from starlette.testclient import TestClient
 
-    stub = MagicMock()
-    stub.verify.return_value = {"aud": "aud-tag"}
+    from src.utils.cloudflare_access import CloudflareAccessVerifier
+
+    main, app = _cf_enabled_app()
     headers = {**_ACCEPT, "Authorization": "Bearer s3cr3t-token"}
-    with TestClient(_cf_enabled_app(stub)) as client:
-        resp = client.post("/mcp/", json=_init_request(), headers=headers)
+    with patch.object(CloudflareAccessVerifier, "verify", return_value={"aud": "aud-tag"}):
+        with TestClient(app) as client:
+            resp = client.post("/mcp/", json=_init_request(), headers=headers)
     assert resp.status_code == 403
 
 
 def test_cf_guard_accepts_valid_bearer_plus_valid_cf_jwt() -> None:
     from starlette.testclient import TestClient
 
-    stub = MagicMock()
-    stub.verify.return_value = {"aud": "aud-tag"}
+    from src.utils.cloudflare_access import CloudflareAccessVerifier
+
+    main, app = _cf_enabled_app()
     headers = {
         **_ACCEPT,
         "Authorization": "Bearer s3cr3t-token",
         "Cf-Access-Jwt-Assertion": "valid-jwt",
     }
-    with TestClient(_cf_enabled_app(stub)) as client:
-        resp = client.post("/mcp/", json=_init_request(), headers=headers)
+    with patch.object(CloudflareAccessVerifier, "verify", return_value={"aud": "aud-tag"}):
+        with TestClient(app) as client:
+            resp = client.post("/mcp/", json=_init_request(), headers=headers)
     assert resp.status_code < 400
 
 

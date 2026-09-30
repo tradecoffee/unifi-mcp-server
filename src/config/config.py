@@ -403,6 +403,14 @@ class Settings(BaseSettings):
         if self.api_type == APIType.LOCAL and not self.local_host:
             raise ValueError("local_host is required when api_type is 'local'")
         # Fail closed on a half-configured Cloudflare Access integration.
+        # A raw value of None or "" means unset (compose `${VAR:-}` style);
+        # anything else that normalizes to nothing is an operator error.
+        domain_set = self.cf_access_team_domain is not None and self.cf_access_team_domain != ""
+        aud_set = self.cf_access_aud is not None and self.cf_access_aud != ""
+        if domain_set and self.cf_access_issuer is None:
+            raise ValueError("CF_ACCESS_TEAM_DOMAIN is set but empty after normalization")
+        if aud_set and not self.cf_access_audiences:
+            raise ValueError("CF_ACCESS_AUD is set but empty after normalization")
         if (self.cf_access_issuer is not None) != bool(self.cf_access_audiences):
             raise ValueError("CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD must be set together")
         return self
