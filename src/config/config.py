@@ -245,6 +245,26 @@ class Settings(BaseSettings):
         validation_alias="MCP_AUTH_TOKEN",
     )
 
+    # Cloudflare Access Configuration (optional JWT validation at the origin)
+    cf_access_team_domain: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare Access team domain (e.g. 'yourteam.cloudflareaccess.com'). "
+            "Set together with CF_ACCESS_AUD to require a valid "
+            "Cf-Access-Jwt-Assertion header on every HTTP request."
+        ),
+        validation_alias="CF_ACCESS_TEAM_DOMAIN",
+    )
+
+    cf_access_aud: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare Access application AUD tag(s), comma-separated. "
+            "Found in Zero Trust -> Access -> Applications -> your app -> Overview."
+        ),
+        validation_alias="CF_ACCESS_AUD",
+    )
+
     @field_validator("api_type", mode="before")
     @classmethod
     def validate_api_type(cls, v: str) -> APIType:
@@ -310,6 +330,51 @@ class Settings(BaseSettings):
             return []
         return [t.strip() for t in self.mcp_auth_token.split(",") if t.strip()]
 
+    @property
+    def cf_access_audiences(self) -> list[str]:
+        """Return the configured Cloudflare Access AUD tags as a list.
+
+        Splits ``CF_ACCESS_AUD`` on commas and drops blanks so an application
+        can accept more than one AUD tag. Empty when unset.
+
+        Returns:
+            List of non-empty AUD tags (possibly empty)
+        """
+        if not self.cf_access_aud:
+            return []
+        return [a.strip() for a in self.cf_access_aud.split(",") if a.strip()]
+
+    @property
+    def cf_access_issuer(self) -> str | None:
+        """Return the Cloudflare Access issuer URL derived from the team domain.
+
+        Normalizes ``CF_ACCESS_TEAM_DOMAIN`` by stripping whitespace, dropping
+        any ``https://`` or ``http://`` scheme prefix and any trailing slash.
+
+        Returns:
+            Issuer URL (``https://<team-domain>``) or None when unset/empty
+        """
+        if not self.cf_access_team_domain:
+            return None
+        domain = self.cf_access_team_domain.strip()
+        for scheme in ("https://", "http://"):
+            if domain.startswith(scheme):
+                domain = domain[len(scheme) :]
+                break
+        domain = domain.rstrip("/")
+        if not domain:
+            return None
+        return f"https://{domain}"
+
+    @property
+    def cf_access_enabled(self) -> bool:
+        """Whether Cloudflare Access JWT validation is fully configured.
+
+        Returns:
+            True when both a team domain (issuer) and at least one AUD tag are set
+        """
+        return self.cf_access_issuer is not None and bool(self.cf_access_audiences)
+
     @field_validator("server_transport", mode="before")
     @classmethod
     def validate_server_transport(cls, v: str) -> TransportMode:
@@ -337,6 +402,17 @@ class Settings(BaseSettings):
         """
         if self.api_type == APIType.LOCAL and not self.local_host:
             raise ValueError("local_host is required when api_type is 'local'")
+        # Fail closed on a half-configured Cloudflare Access integration.
+        # A raw value of None or "" means unset (compose `${VAR:-}` style);
+        # anything else that normalizes to nothing is an operator error.
+        domain_set = self.cf_access_team_domain is not None and self.cf_access_team_domain != ""
+        aud_set = self.cf_access_aud is not None and self.cf_access_aud != ""
+        if domain_set and self.cf_access_issuer is None:
+            raise ValueError("CF_ACCESS_TEAM_DOMAIN is set but empty after normalization")
+        if aud_set and not self.cf_access_audiences:
+            raise ValueError("CF_ACCESS_AUD is set but empty after normalization")
+        if (self.cf_access_issuer is not None) != bool(self.cf_access_audiences):
+            raise ValueError("CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD must be set together")
         return self
 
     @property

@@ -13,7 +13,9 @@ try:
 except importlib.metadata.PackageNotFoundError:
     _SERVER_VERSION = "unknown"
 
+import fastmcp
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
 
 from .a2a import A2AState
 from .a2a.audit import get_audit_logger
@@ -46,8 +48,8 @@ from .tools import firewall as firewall_tools
 from .tools import firewall_groups as firewall_groups_tools
 from .tools import firewall_policies as firewall_policies_tools
 from .tools import firewall_zones as firewall_zones_tools
-from .tools import integration_api as integration_api_tools
 from .tools import innerspace as innerspace_tools
+from .tools import integration_api as integration_api_tools
 from .tools import mac_tags as mac_tags_tools
 from .tools import mobility as mobility_tools
 from .tools import network_config as network_config_tools
@@ -84,6 +86,8 @@ from .tools import vpn as vpn_tools
 from .tools import wans as wans_tools
 from .tools import wifi as wifi_tools
 from .utils import get_logger
+from .utils.cloudflare_access import CloudflareAccessGuard, CloudflareAccessVerifier
+from .utils.session_guard import SessionlessRequestGuard
 
 # ---------------------------------------------------------------------------
 # Initialisation
@@ -117,6 +121,44 @@ def build_auth_provider(current_settings: Settings) -> Any:
     return StaticTokenVerifier(
         tokens={token: {"client_id": "mcp-client", "scopes": []} for token in tokens}
     )
+
+
+def build_http_middleware(current_settings: Settings) -> list[Middleware]:
+    """Build the HTTP middleware stack for network transports.
+
+    Returns an ordered list: the Cloudflare Access JWT guard (outermost,
+    when ``CF_ACCESS_TEAM_DOMAIN`` + ``CF_ACCESS_AUD`` are set) followed by
+    the sessionless-request guard (all transports except SSE). Starlette
+    treats the first list entry as outermost, so the Cloudflare check runs
+    before anything else.
+
+    Args:
+        current_settings: Loaded application settings
+
+    Returns:
+        List of starlette Middleware entries (possibly empty)
+    """
+    middleware: list[Middleware] = []
+    if current_settings.cf_access_enabled:
+        middleware.append(
+            Middleware(
+                CloudflareAccessGuard,
+                verifier=CloudflareAccessVerifier(
+                    issuer=current_settings.cf_access_issuer,  # type: ignore[arg-type]
+                    audiences=current_settings.cf_access_audiences,
+                ),
+            )
+        )
+    if current_settings.server_transport != TransportMode.SSE:
+        # Stop sessionless, non-initialize requests (health checks, probes)
+        # from each leaking a registered session in the MCP SDK (issue #173).
+        middleware.append(
+            Middleware(
+                SessionlessRequestGuard,
+                path=fastmcp.settings.streamable_http_path,
+            )
+        )
+    return middleware
 
 
 def ensure_network_transport_authenticated(current_settings: Settings, auth_provider: Any) -> None:
@@ -736,6 +778,12 @@ def main() -> None:
         ensure_network_transport_authenticated(settings, mcp_auth)
         logger.info(f"Transport: {settings.server_transport.value}")
         logger.info("MCP authentication: bearer token required (MCP_AUTH_TOKEN)")
+        if settings.cf_access_enabled:
+            logger.info(
+                "Cloudflare Access: JWT required "
+                f"(issuer={settings.cf_access_issuer}, "
+                f"{len(settings.cf_access_audiences)} audience(s))"
+            )
         logger.info(f"Server listening on {settings.server_host}:{settings.server_port}")
         register_a2a_routes(mcp, a2a_state, mcp_auth)
         logger.info(
@@ -749,23 +797,11 @@ def main() -> None:
         # translate at this one call site rather than changing the public
         # config value (issue #159).
         transport = settings.server_transport.value.replace("_", "-")
-        run_kwargs: dict[str, Any] = {}
-        if settings.server_transport != TransportMode.SSE:
-            # Stop sessionless, non-initialize requests (health checks, probes)
-            # from each leaking a registered session in the MCP SDK (issue #173).
-            import fastmcp
-            from starlette.middleware import Middleware
-
-            from .utils.session_guard import SessionlessRequestGuard
-
-            run_kwargs["middleware"] = [
-                Middleware(SessionlessRequestGuard, path=fastmcp.settings.streamable_http_path)
-            ]
         mcp.run(
             transport=transport,
             host=settings.server_host,
             port=settings.server_port,
-            **run_kwargs,
+            middleware=build_http_middleware(settings),
         )
 
 

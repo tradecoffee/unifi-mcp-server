@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- markdownlint-disable MD024 -->
+
 ## [Unreleased]
+
+### Added
+
+- **Optional Cloudflare Access JWT validation at the origin**: when both `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set, every HTTP request must carry a valid `Cf-Access-Jwt-Assertion` header (verified against the team domain's JWKS) in addition to the mandatory `MCP_AUTH_TOKEN` bearer token. Requests bypassing Cloudflare Access receive 403. Both variables must be set together; unset preserves existing behaviour.
 
 ### Fixed
 
@@ -27,7 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Latent Integration API write-path defects F1–F3 fixed after live-hardware confirmation** (audit 2026-09-26, probes 2026-09-27 on U7 Express / Network 10.x): the spec endpoints were proven live (400 validation errors for invalid payloads) while all three legacy routes the code used return 404 "No endpoint" on current controllers. `adopt_device` now identifies the device by MAC and POSTs `/v1/sites/{siteId}/devices` with `{macAddress, ignoreDeviceLimit}` (was: non-existent `.../devices/{id}/adopt`); `execute_port_action` now uses the plural `.../interfaces/ports/{idx}/actions` path restricted to the spec's only port action, `POWER_CYCLE`, and no longer sends the unspecced `params` field; `authorize_guest` uses the plural `.../clients/{clientId}/actions` path with the spec's `AUTHORIZE_GUEST_ACCESS` discriminator body (limits at top level: `timeLimitMinutes`, `rxRateLimitKbps`, `txRateLimitKbps`, `dataUsageLimitMBytes`). **Breaking:** `limit_bandwidth` has no Integration API equivalent — it now raises `NotImplementedError` directing callers to `authorize_guest`'s rate-limit parameters (the legacy `limit-bandwidth` endpoint 404s on current controllers).
-
 
 ### Security
 

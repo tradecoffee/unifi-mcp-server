@@ -61,6 +61,122 @@ def test_auth_tokens_split_on_comma() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Cloudflare Access settings
+# --------------------------------------------------------------------------- #
+
+
+def test_cf_access_disabled_by_default() -> None:
+    settings = _settings()
+    assert settings.cf_access_team_domain is None
+    assert settings.cf_access_aud is None
+    assert settings.cf_access_issuer is None
+    assert settings.cf_access_audiences == []
+    assert settings.cf_access_enabled is False
+
+
+def test_cf_access_requires_aud_too() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="must be set together"):
+        _settings(CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com")
+
+
+def test_cf_access_requires_team_domain_too() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="must be set together"):
+        _settings(CF_ACCESS_AUD="aud-tag")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "team.cloudflareaccess.com",
+        "https://team.cloudflareaccess.com/",
+        " team.cloudflareaccess.com ",
+    ],
+)
+def test_cf_access_issuer_normalization(raw) -> None:
+    settings = _settings(CF_ACCESS_TEAM_DOMAIN=raw, CF_ACCESS_AUD="aud-tag")
+    assert settings.cf_access_issuer == "https://team.cloudflareaccess.com"
+
+
+def test_cf_access_whitespace_only_values_fail() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="CF_ACCESS_TEAM_DOMAIN"):
+        _settings(CF_ACCESS_TEAM_DOMAIN="  ", CF_ACCESS_AUD="  ")
+
+
+def test_cf_access_comma_only_aud_fails() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="CF_ACCESS_AUD"):
+        _settings(CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com", CF_ACCESS_AUD=",")
+
+
+def test_cf_access_empty_strings_mean_unset() -> None:
+    settings = _settings(CF_ACCESS_TEAM_DOMAIN="", CF_ACCESS_AUD="")
+    assert settings.cf_access_enabled is False
+
+
+def test_cf_access_audiences_split_on_comma() -> None:
+    settings = _settings(
+        CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com",
+        CF_ACCESS_AUD=" a , b ,, c ",
+    )
+    assert settings.cf_access_audiences == ["a", "b", "c"]
+    assert settings.cf_access_enabled is True
+
+
+# --------------------------------------------------------------------------- #
+# build_http_middleware
+# --------------------------------------------------------------------------- #
+
+
+def _middleware_classes(middleware) -> list:
+    return [m.cls for m in middleware]
+
+
+def test_build_http_middleware_cf_plus_session_guard_for_streamable() -> None:
+    from src.utils.cloudflare_access import CloudflareAccessGuard
+    from src.utils.session_guard import SessionlessRequestGuard
+
+    main = _reload_main()
+    settings = _settings(
+        MCP_SERVER_TRANSPORT="streamable_http",
+        MCP_AUTH_TOKEN="tok",
+        CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com",
+        CF_ACCESS_AUD="aud-tag",
+    )
+    assert _middleware_classes(main.build_http_middleware(settings)) == [
+        CloudflareAccessGuard,
+        SessionlessRequestGuard,
+    ]
+
+
+def test_build_http_middleware_cf_only_for_sse() -> None:
+    from src.utils.cloudflare_access import CloudflareAccessGuard
+
+    main = _reload_main()
+    settings = _settings(
+        MCP_SERVER_TRANSPORT="sse",
+        MCP_AUTH_TOKEN="tok",
+        CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com",
+        CF_ACCESS_AUD="aud-tag",
+    )
+    assert _middleware_classes(main.build_http_middleware(settings)) == [CloudflareAccessGuard]
+
+
+def test_build_http_middleware_session_guard_only_without_cf() -> None:
+    from src.utils.session_guard import SessionlessRequestGuard
+
+    main = _reload_main()
+    settings = _settings(MCP_SERVER_TRANSPORT="streamable_http", MCP_AUTH_TOKEN="tok")
+    assert _middleware_classes(main.build_http_middleware(settings)) == [SessionlessRequestGuard]
+
+
+# --------------------------------------------------------------------------- #
 # build_auth_provider / ensure_network_transport_authenticated
 # --------------------------------------------------------------------------- #
 
@@ -177,6 +293,53 @@ def test_http_endpoint_accepts_valid_token() -> None:
     with TestClient(_http_app()) as client:
         resp = client.post("/mcp/", json=_init_request(), headers=headers)
     # A valid token clears authentication; the MCP handshake then answers 2xx.
+    assert resp.status_code < 400
+
+
+# --- Cloudflare Access on top of bearer auth -------------------------------
+
+
+def _cf_enabled_app():
+    """The streamable-http app built with main()'s production middleware stack."""
+    main = _reload_main(
+        MCP_SERVER_TRANSPORT="streamable_http",
+        MCP_AUTH_TOKEN="s3cr3t-token",
+        CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com",
+        CF_ACCESS_AUD="aud-tag",
+    )
+    return main, main.mcp.http_app(
+        transport="streamable-http",
+        middleware=main.build_http_middleware(main.settings),
+    )
+
+
+def test_cf_guard_rejects_valid_bearer_without_cf_jwt() -> None:
+    from starlette.testclient import TestClient
+
+    from src.utils.cloudflare_access import CloudflareAccessVerifier
+
+    main, app = _cf_enabled_app()
+    headers = {**_ACCEPT, "Authorization": "Bearer s3cr3t-token"}
+    with patch.object(CloudflareAccessVerifier, "verify", return_value={"aud": "aud-tag"}):
+        with TestClient(app) as client:
+            resp = client.post("/mcp/", json=_init_request(), headers=headers)
+    assert resp.status_code == 403
+
+
+def test_cf_guard_accepts_valid_bearer_plus_valid_cf_jwt() -> None:
+    from starlette.testclient import TestClient
+
+    from src.utils.cloudflare_access import CloudflareAccessVerifier
+
+    main, app = _cf_enabled_app()
+    headers = {
+        **_ACCEPT,
+        "Authorization": "Bearer s3cr3t-token",
+        "Cf-Access-Jwt-Assertion": "valid-jwt",
+    }
+    with patch.object(CloudflareAccessVerifier, "verify", return_value={"aud": "aud-tag"}):
+        with TestClient(app) as client:
+            resp = client.post("/mcp/", json=_init_request(), headers=headers)
     assert resp.status_code < 400
 
 

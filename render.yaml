@@ -1,0 +1,29 @@
+# Render Blueprint: runs the MCP server as a Docker web service over
+# Streamable HTTP with bearer-token auth. Render terminates TLS; clients use
+# https://<service>.onrender.com/mcp with "Authorization: Bearer $MCP_AUTH_TOKEN".
+# Render cannot reach a LAN controller, so this uses the cloud API (api.ui.com).
+services:
+  - type: web
+    runtime: docker
+    name: unifi-mcp-server
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: UNIFI_API_KEY
+        sync: false
+      - key: UNIFI_API_TYPE
+        value: cloud-ea
+      - key: MCP_SERVER_TRANSPORT
+        value: streamable_http
+      - key: MCP_SERVER_HOST
+        value: 0.0.0.0
+      - key: MCP_SERVER_PORT
+        value: 10000
+      - key: PORT
+        value: 10000
+      - key: MCP_AUTH_TOKEN
+        generateValue: true
+      - key: UNIFI_AUDIT_LOG_PATH
+        value: /app/logs/audit.log
+      # Optional when fronted by Cloudflare Access: also set
+      # CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD in the Render dashboard.
